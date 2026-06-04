@@ -4,170 +4,361 @@ import joblib
 import os
 
 
-def detect_suspicious(input_csv, output_csv="suspicious_customers.csv"):
+def detect_suspicious(
+    input_csv,
+    output_csv="suspicious_customers.csv"
+):
 
-    # -----------------------------
-    # 1. VALIDATION
-    # -----------------------------
+    # -------------------------------------------------
+    # 1. FILE VALIDATION
+    # -------------------------------------------------
     if not os.path.exists(input_csv):
-        raise FileNotFoundError(f"File not found: {input_csv}")
+        raise FileNotFoundError(
+            f"File not found: {input_csv}"
+        )
 
     df = pd.read_csv(input_csv)
 
-    required_columns = ['ClientId', 'TransactionAmount', 'TransactionDate']
-    missing_cols = [col for col in required_columns if col not in df.columns]
-
-    if missing_cols:
-        raise ValueError(f"Missing required columns: {missing_cols}")
-
-    # -----------------------------
-    # 2. DATA PREPARATION
-    # -----------------------------
-    df['TransactionDate'] = pd.to_datetime(df['TransactionDate'], errors='coerce')
-    df = df.dropna(subset=['TransactionDate', 'TransactionAmount'])
-
-    # -----------------------------
-    # 3. FEATURE ENGINEERING
-    # -----------------------------
-    agg = df.groupby('ClientId').agg({
-        'TransactionAmount': ['count', 'sum', 'mean', 'max', 'min', 'std'],
-        'TransactionDate': ['min', 'max', 'nunique']
-    })
-
-    agg.columns = [
+    # -------------------------------------------------
+    # 2. REQUIRED COLUMNS
+    # -------------------------------------------------
+    required_columns = [
+        'ClientId',
+        'Age',
+        'Gender',
+        'Occupation',
+        'ClientType',
+        'SeniorCitizenFlag',
+        'RiskCategoryId',
         'total_transactions',
         'total_amount',
         'avg_transaction',
         'max_transaction',
         'min_transaction',
+        'recency_days',
+        'activity_span',
+        'active_days',
         'amount_std',
-        'first_txn',
-        'last_txn',
-        'active_days'
+        'transactions_per_day'
     ]
 
-    agg = agg.reset_index()
+    missing_cols = [
+        col for col in required_columns
+        if col not in df.columns
+    ]
 
-    # Handle missing std
-    agg['amount_std'] = agg['amount_std'].fillna(0)
+    if missing_cols:
+        raise ValueError(
+            f"Missing required columns: {missing_cols}"
+        )
 
-    # Time-based features
-    today = pd.Timestamp.today()
-    agg['recency_days'] = (today - agg['last_txn']).dt.days
-    agg['activity_span'] = (agg['last_txn'] - agg['first_txn']).dt.days
-
-    # -----------------------------
-    # ADD REQUIRED FEATURES
-    # -----------------------------
-    agg['transactions_per_day'] = agg['total_transactions'] / agg['active_days'].replace(0, 1)
-    agg['amount_var'] = agg['amount_std'] ** 2
-    agg['total_accounts'] = 1  # placeholder
-
-    # -----------------------------
-    # 4. LOAD MODEL FILES
-    # -----------------------------
+    # -------------------------------------------------
+    # 3. LOAD MODEL FILES
+    # -------------------------------------------------
     try:
         scaler = joblib.load("scaler.pkl")
         kmeans = joblib.load("kmeans.pkl")
         threshold = joblib.load("threshold.pkl")
         feature_order = joblib.load("feature_order.pkl")
+        occupation_encoder = joblib.load(
+            "occupation_encoder.pkl"
+        )
+
     except Exception as e:
-        raise RuntimeError(f"Error loading model files: {e}")
+        raise RuntimeError(
+            f"Error loading model files: {e}"
+        )
 
-    # -----------------------------
-    # 5. FEATURE ALIGNMENT
-    # -----------------------------
-    missing_features = [f for f in feature_order if f not in agg.columns]
-    if missing_features:
-        raise ValueError(f"Missing features in input data: {missing_features}")
+    # -------------------------------------------------
+    # 4. BASIC CLEANING
+    # -------------------------------------------------
+    df = df.copy()
 
-    features = agg[feature_order]
-
-    # -----------------------------
-    # 6. SCALING + DISTANCE
-    # -----------------------------
-    scaled = scaler.transform(features)
-
-    distances = kmeans.transform(scaled)
-    agg['distance'] = np.min(distances, axis=1)
-
-    # -----------------------------
-    # 7. ANOMALY DETECTION (CORE ML)
-    # -----------------------------
-    agg['anomaly'] = agg['distance'] > threshold
-
-    # -----------------------------
-    # 8. RULE-BASED FLAGS
-    # -----------------------------
-    high_amount_threshold = agg['avg_transaction'].quantile(0.98)
-    high_variance_threshold = agg['amount_std'].quantile(0.98)
-
-    agg['high_amount_flag'] = agg['avg_transaction'] > high_amount_threshold
-    agg['high_variance_flag'] = agg['amount_std'] > high_variance_threshold
-
-    # -----------------------------
-    # 9. RISK SCORING (FINAL)
-    # -----------------------------
-    agg['risk_score'] = (
-        agg['anomaly'].astype(int) * 2 +
-        agg['high_amount_flag'].astype(int) +
-        agg['high_variance_flag'].astype(int)
+    df['Age'] = df['Age'].fillna(
+        df['Age'].median()
     )
 
-    # -----------------------------
-    # FINAL SUSPICIOUS LOGIC
-    # -----------------------------
-    amount_threshold = max(
-        agg['total_amount'].quantile(0.92),
-        2_000_000   
+    df['Gender'] = df['Gender'].fillna(0)
+
+    df['Occupation'] = df['Occupation'].fillna(
+        "UNKNOWN"
     )
 
-    avg_txn_threshold = max(
-        agg['avg_transaction'].quantile(0.92),
-        150_000   
-    )
-
-    agg['suspicious'] = (
-        (agg['anomaly'] == True) &
-        (agg['risk_score'] >= 3) &
-        (
-            (agg['total_amount'] > amount_threshold) &
-            (agg['avg_transaction'] > avg_txn_threshold)
+    df['SeniorCitizenFlag'] = (
+        df['SeniorCitizenFlag']
+        .fillna(
+            df['SeniorCitizenFlag']
+            .mode()[0]
         )
     )
 
-    # -----------------------------
-    # DISTRIBUTION CHECKS
-    # -----------------------------
-    print("\n📊 Suspicious Distribution:")
-    print(agg['suspicious'].value_counts())
+    df['RiskCategoryId'] = (
+        df['RiskCategoryId']
+        .fillna(
+            df['RiskCategoryId']
+            .mode()[0]
+        )
+    )
 
-    print("\n📊 Risk Score Distribution:")
-    print(agg['risk_score'].value_counts())
+    df['amount_std'] = (
+        df['amount_std']
+        .fillna(0)
+    )
 
-    print("\n📊 Distance Summary:")
-    print(agg['distance'].describe())
+    # -------------------------------------------------
+    # 5. AGE VALIDATION
+    # -------------------------------------------------
+    df.loc[
+        (df['Age'] < 18) |
+        (df['Age'] > 100),
+        'Age'
+    ] = df['Age'].median()
 
-    # -----------------------------
-    # 10. OUTPUT
-    # -----------------------------
-    output = agg[agg['suspicious'] == True]
+    # -------------------------------------------------
+    # 6. OCCUPATION ENCODING
+    # -------------------------------------------------
+    try:
+        df['Occupation'] = (
+            occupation_encoder.transform(
+                df['Occupation']
+            )
+        )
 
-    output.to_csv(output_csv, index=False)
+    except Exception:
+        raise ValueError(
+            "Occupation contains unseen values."
+        )
 
-    print(f"\n✅ Suspicious customers saved to: {output_csv}")
-    print(f"🚨 Total suspicious users: {len(output)}")
+    # -------------------------------------------------
+    # 7. LOG TRANSFORMATION
+    # -------------------------------------------------
+    log_cols = [
+        'total_amount',
+        'avg_transaction',
+        'max_transaction',
+        'amount_std',
+        'transactions_per_day'
+    ]
+
+    for col in log_cols:
+
+        df[col] = np.log1p(
+            df[col].clip(lower=0)
+        )
+
+    # -------------------------------------------------
+    # 8. FEATURE ALIGNMENT
+    # -------------------------------------------------
+    features = df[
+        feature_order
+    ].copy()
+
+    # -------------------------------------------------
+    # 9. SCALING
+    # -------------------------------------------------
+    scaled = scaler.transform(
+        features
+    )
+
+    # -------------------------------------------------
+    # 10. DISTANCE CALCULATION
+    # -------------------------------------------------
+    distances = kmeans.transform(
+        scaled
+    )
+
+    df['distance'] = np.min(
+        distances,
+        axis=1
+    )
+
+    # -------------------------------------------------
+    # 11. ANOMALY DETECTION
+    # -------------------------------------------------
+    df['anomaly'] = (
+        df['distance'] > threshold
+    )
+
+    # -------------------------------------------------
+    # 12. RULE BASED FLAGS
+    # -------------------------------------------------
+    high_amount_threshold = (
+        df['total_amount']
+        .quantile(0.95)
+    )
+
+    high_variance_threshold = (
+        df['amount_std']
+        .quantile(0.95)
+    )
+
+    high_frequency_threshold = (
+        df['transactions_per_day']
+        .quantile(0.95)
+    )
+
+    df['high_amount_flag'] = (
+        df['total_amount']
+        > high_amount_threshold
+    )
+
+    df['high_variance_flag'] = (
+        df['amount_std']
+        > high_variance_threshold
+    )
+
+    df['high_frequency_flag'] = (
+        df['transactions_per_day']
+        > high_frequency_threshold
+    )
+
+    # -------------------------------------------------
+    # 13. RISK SCORE
+    # -------------------------------------------------
+    df['risk_score'] = (
+        df['anomaly'].astype(int) * 2 +
+        df['high_amount_flag'].astype(int) +
+        df['high_variance_flag'].astype(int) +
+        df['high_frequency_flag'].astype(int)
+    )
+
+    # -------------------------------------------------
+    # 14. RISK LEVEL
+    # -------------------------------------------------
+    df['risk_level'] = 'LOW'
+
+    df.loc[
+        df['risk_score'] >= 4,
+    'risk_level'
+    ] = 'MEDIUM'
+
+    df.loc[
+    df['risk_score'] >= 4,
+    'risk_level'
+    ] = 'HIGH'
+
+    df.loc[
+    df['risk_score'] >= 5,
+    'risk_level'
+    ] = 'CRITICAL'
+
+    # -------------------------------------------------
+    # 15. FRAUD EXPLANATION
+    # -------------------------------------------------
+    def generate_reason(row):
+
+        reasons = []
+
+        if row['anomaly']:
+            reasons.append(
+                "Anomalous behavior"
+            )
+
+        if row['high_amount_flag']:
+            reasons.append(
+                "High transaction amount"
+            )
+
+        if row['high_variance_flag']:
+            reasons.append(
+                "High transaction variance"
+            )
+
+        if row['high_frequency_flag']:
+            reasons.append(
+                "High transaction frequency"
+            )
+
+        return ", ".join(reasons)
+
+
+    df['reason'] = df.apply(
+        generate_reason,
+        axis=1
+    )
+
+    # -------------------------------------------------
+    # 16. FINAL SUSPICIOUS LOGIC
+    # -------------------------------------------------
+    df['suspicious'] = (
+        (df['anomaly'] == True)
+        &
+        (df['risk_score'] >= 4)
+    )
+
+    # -------------------------------------------------
+    # 17. DISTRIBUTION REPORT
+    # -------------------------------------------------
+    print("\n📊 Suspicious Distribution")
+    print(
+        df['suspicious']
+        .value_counts()
+    )
+
+    print("\n📊 Risk Score Distribution")
+    print(
+        df['risk_score']
+        .value_counts()
+    )
+
+    print("\n📊 Distance Summary")
+    print(
+        df['distance']
+        .describe()
+    )
+
+    # -------------------------------------------------
+    # 18. OUTPUT
+    # -------------------------------------------------
+    output_cols = [
+        'ClientId',
+        'distance',
+        'risk_score',
+        'risk_level',
+        'reason',
+        'anomaly',
+        'high_amount_flag',
+        'high_variance_flag',
+        'high_frequency_flag',
+        'total_amount',
+        'avg_transaction',
+        'total_transactions',
+        'suspicious'
+    ]
+
+    output = df[
+        df['suspicious']
+    ][output_cols]
+
+    output.to_csv(
+        output_csv,
+        index=False
+    )
+
+    print(
+        f"\n✅ Suspicious customers saved to: {output_csv}"
+    )
+
+    print(
+        f"🚨 Total suspicious users: {len(output)}"
+    )
 
     return output
 
 
-# -----------------------------
-# ENTRY POINT
-# -----------------------------
 if __name__ == "__main__":
-    file_path = input("Enter CSV file path: ").strip()
+
+    file_path = input(
+        "Enter CSV file path: "
+    ).strip()
 
     try:
-        detect_suspicious(file_path)
+        detect_suspicious(
+            file_path
+        )
+
     except Exception as e:
-        print(f"❌ Error: {e}")
+
+        print(
+            f"❌ Error: {e}"
+        )
